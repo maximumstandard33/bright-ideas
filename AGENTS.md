@@ -28,3 +28,5 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+- SmartCart pricing is mock data in src/data/mockGroceryDb.ts; fee and split logic lives in src/lib/priceEngine.ts so the UI stays logic-free.
