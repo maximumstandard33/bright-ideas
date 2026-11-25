@@ -1,4 +1,4 @@
-import { CATALOG, type Sku } from "@/data/mockGroceryDb";
+import { CATALOG, type PlatformId, type Sku } from "@/data/mockGroceryDb";
 
 export interface ParsedItem {
   key: string;
@@ -8,6 +8,8 @@ export interface ParsedItem {
   sku: Sku | null;
   confidence: number;
   alternatives: Sku[];
+  /** Force this line to be bought on a specific platform. */
+  pin?: PlatformId | null;
 }
 
 const UNIT_TO_BASE: Record<string, [number, Sku["base"]]> = {

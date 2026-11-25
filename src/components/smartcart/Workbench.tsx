@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Check, Clock, Minus, Plus, ShoppingBag, SlidersHorizontal, Store, X } from "lucide-react";
-import { CATALOG, PINCODES, PLATFORMS, PRICE_HISTORY, SAMPLES, type Sku } from "@/data/mockGroceryDb";
+import { ArrowRight, Check, Clock, Minus, Pin, Plus, ShoppingBag, SlidersHorizontal, Store, X } from "lucide-react";
+import { CATALOG, PINCODES, PLATFORMS, SAMPLES, surgeFor, trendsFor, type PlatformId, type Sku } from "@/data/mockGroceryDb";
 import { parseManifest, type ParsedItem } from "@/lib/parser";
-import { bestSplit, cheapestPlatform, inr, singleStorePlans, unitRate, type Line, type Plan } from "@/lib/priceEngine";
+import { bestSplit, cheapestPlatform, inr, singleStorePlans, unitRate, type EngineCtx, type Line, type Plan } from "@/lib/priceEngine";
 
 type Step = 1 | 2 | 3;
 
 export function Workbench() {
   const [pincode, setPincode] = useState("560038");
   const [quickOnly, setQuickOnly] = useState(false);
+  const [excluded, setExcluded] = useState<PlatformId[]>([]);
+  const [dmartPickup, setDmartPickup] = useState(false);
   const [raw, setRaw] = useState(SAMPLES[1]!.text);
   const [items, setItems] = useState<ParsedItem[]>(() => parseManifest(SAMPLES[1]!.text));
   const [ran, setRan] = useState<ParsedItem[] | null>(null);
@@ -19,25 +21,45 @@ export function Workbench() {
   const [step, setStep] = useState<Step>(1);
   const [showHistory, setShowHistory] = useState(false);
   const timer = useRef<number[]>([]);
+  const pinInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setItems(parseManifest(raw)); }, [raw]);
 
-  const platforms = useMemo(() => PLATFORMS.filter((p) => !quickOnly || p.quick), [quickOnly]);
+  const platforms = useMemo(
+    () => PLATFORMS.filter((p) => (!quickOnly || p.quick) && !excluded.includes(p.id)),
+    [quickOnly, excluded],
+  );
+  const ctx: EngineCtx = useMemo(
+    () => ({
+      surgeOf: (p) => surgeFor(p, pincode).amount,
+      pickupOf: (p) => p.id === "dmart" && dmartPickup,
+    }),
+    [pincode, dmartPickup],
+  );
   const lines: Line[] = useMemo(
-    () => (ran ?? []).filter((i) => i.sku).map((i) => ({ key: i.key, sku: i.sku!, count: i.count })),
+    () => (ran ?? []).filter((i) => i.sku).map((i) => {
+      const pin = i.pin ?? undefined;
+      return pin
+        ? { key: i.key, sku: i.sku!, count: i.count, pin }
+        : { key: i.key, sku: i.sku!, count: i.count };
+    }),
     [ran],
   );
-  const singles = useMemo(() => singleStorePlans(lines, platforms), [lines, platforms]);
+  const singles = useMemo(() => singleStorePlans(lines, platforms, ctx), [lines, platforms, ctx]);
   const champion = useMemo(() => {
     const full = singles.filter((s) => s.fulfilled === lines.length);
     const pool = full.length ? full : singles;
     return pool.reduce<Plan | null>((a, b) => (!a || b.fulfilled > a.fulfilled || (b.fulfilled === a.fulfilled && b.total < a.total) ? b : a), null);
   }, [singles, lines.length]);
-  const split = useMemo(() => bestSplit(lines, platforms), [lines, platforms]);
+  const split = useMemo(() => bestSplit(lines, platforms, ctx), [lines, platforms, ctx]);
   const spread = useMemo(() => {
     const full = singles.filter((s) => s.fulfilled === lines.length).map((s) => s.total);
     return full.length > 1 ? { hi: Math.max(...full), lo: Math.min(...full) } : null;
   }, [singles, lines.length]);
+  const trends = useMemo(
+    () => trendsFor((ran ?? []).filter((i) => i.sku).map((i) => `${i.sku!.brand} ${i.sku!.name}`.toLowerCase())),
+    [ran],
+  );
 
   const run = () => {
     timer.current.forEach(clearTimeout);
@@ -65,6 +87,9 @@ export function Workbench() {
     setItems((xs) => xs.filter((x) => x.key !== key));
     setRan((xs) => xs && xs.filter((x) => x.key !== key));
   };
+  const togglePlatform = (id: PlatformId) => {
+    setExcluded((xs) => (xs.includes(id) ? xs.filter((x) => x !== id) : xs.length === PLATFORMS.length - 1 ? xs : [...xs, id]));
+  };
 
   const exportCsv = () => {
     const head = ["Item", "Size", "Qty", ...PLATFORMS.map((p) => p.name)].join(",");
@@ -74,6 +99,7 @@ export function Workbench() {
   };
 
   const area = PINCODES[pincode];
+  const dmartInPlay = platforms.some((p) => p.id === "dmart");
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -83,7 +109,10 @@ export function Workbench() {
           <span className="label-mono hidden sm:inline">v1.2 // PROD-BENCH</span>
         </div>
         <div className="mx-auto hidden font-mono text-xs md:block">
-          <span className="rounded-sm border border-border bg-card px-2 py-1">DELIVERY TO: {pincode} {area ? `- ${area}` : "- UNMAPPED"}</span>
+          <span className="rounded-sm border border-border bg-card px-2 py-1">
+            DELIVERY TO: {pincode} {area ? `- ${area}` : "- UNMAPPED"}
+            <button onClick={() => { setStep(1); pinInput.current?.focus(); }} className="ml-2 text-primary hover:underline">CHANGE</button>
+          </span>
         </div>
         <div className="ml-auto flex items-center gap-3 font-mono text-xs md:ml-0">
           <button onClick={() => setLive((v) => !v)} className="flex items-center gap-1.5 rounded-sm border border-border px-2 py-1 hover:border-border-strong">
@@ -110,7 +139,7 @@ export function Workbench() {
             <div className="grid grid-cols-[1fr_auto] gap-2">
               <label className="block">
                 <span className="label-mono">Pincode</span>
-                <input value={pincode} onChange={(e) => setPincode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                <input ref={pinInput} value={pincode} onChange={(e) => setPincode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   className="mt-1 w-full rounded-sm border border-input bg-card px-2.5 py-2 font-mono text-sm tabular-nums outline-none focus:border-primary" />
                 <span className="mt-1 block font-mono text-[11px] text-muted-foreground">{area ?? "Try 560034, 400050, 110017, 122002"}</span>
               </label>
@@ -120,6 +149,32 @@ export function Workbench() {
                   <button onClick={() => setQuickOnly(true)} className={`px-2.5 py-2 ${quickOnly ? "bg-foreground text-background" : ""}`}>&lt;15 MIN</button>
                   <button onClick={() => setQuickOnly(false)} className={`px-2.5 py-2 ${!quickOnly ? "bg-foreground text-background" : ""}`}>ANY</button>
                 </div>
+              </div>
+            </div>
+
+            {dmartInPlay && (
+              <div>
+                <span className="label-mono">DMart Ready fulfilment</span>
+                <div className="mt-1 flex w-fit rounded-sm border border-input font-mono text-[11px]">
+                  <button onClick={() => setDmartPickup(true)} className={`px-2.5 py-2 ${dmartPickup ? "bg-foreground text-background" : ""}`}>PICKUP ₹0</button>
+                  <button onClick={() => setDmartPickup(false)} className={`px-2.5 py-2 ${!dmartPickup ? "bg-foreground text-background" : ""}`}>DELIVER ₹49</button>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <span className="label-mono">Platforms in play</span>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {PLATFORMS.map((p) => {
+                  const off = excluded.includes(p.id);
+                  const dimmed = quickOnly && !p.quick;
+                  return (
+                    <button key={p.id} onClick={() => togglePlatform(p.id)} disabled={dimmed} title={p.name}
+                      className={`rounded-sm border px-2 py-1 font-mono text-[11px] ${off || dimmed ? "border-border text-muted-foreground line-through opacity-60" : "border-border-strong bg-card"} ${dimmed ? "cursor-not-allowed" : "hover:border-primary"}`}>
+                      {p.short}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -177,7 +232,9 @@ export function Workbench() {
                     meta={spread ? `${inr(spread.hi)} → ${inr(spread.lo)}` : "Needs 2+ complete stores"} />
                 </div>
 
-                <Matrix lines={lines} platforms={platforms} ran={ran} onVariant={(key, sku) => updateItem(key, { sku })} />
+                <Matrix lines={lines} platforms={platforms} ran={ran} ctx={ctx}
+                  onVariant={(key, sku) => updateItem(key, { sku })}
+                  onPin={(key, pin) => updateItem(key, { pin })} />
               </section>
 
               <section className={`${step === 3 ? "block" : "hidden"} space-y-4 lg:block`}>
@@ -207,8 +264,8 @@ export function Workbench() {
             </button>
             {showHistory && (
               <div className="grid gap-px overflow-hidden rounded-sm border border-border bg-border sm:grid-cols-2 xl:grid-cols-5">
-                {PRICE_HISTORY.map((h) => (
-                  <div key={h.label} className="bg-card p-3">
+                {trends.map((h) => (
+                  <div key={h.key} className="bg-card p-3">
                     <div className="text-[12px] font-medium">{h.label}</div>
                     <div className="label-mono">30D VOL {h.vol}</div>
                     <Sparkline points={h.points} />
@@ -280,19 +337,32 @@ function TokenRow({ it, onChange, onRemove }: { it: ParsedItem; onChange: (p: Pa
   );
 }
 
-function Matrix({ lines, platforms, ran, onVariant }: { lines: Line[]; platforms: typeof PLATFORMS; ran: ParsedItem[]; onVariant: (key: string, sku: Sku) => void }) {
+function Matrix({ lines, platforms, ran, ctx, onVariant, onPin }: {
+  lines: Line[];
+  platforms: typeof PLATFORMS;
+  ran: ParsedItem[];
+  ctx: EngineCtx;
+  onVariant: (key: string, sku: Sku) => void;
+  onPin: (key: string, pin: PlatformId | null) => void;
+}) {
   return (
     <div className="overflow-x-auto rounded-sm border border-border bg-card">
-      <table className="w-full min-w-[860px] border-collapse text-[13px]">
+      <table className="w-full min-w-[900px] border-collapse text-[13px]">
         <thead className="sticky top-0 bg-secondary">
           <tr className="border-b border-border text-left">
             <th className="label-mono px-3 py-2 font-normal">Item & variant</th>
-            {platforms.map((p) => (
-              <th key={p.id} className="label-mono px-3 py-2 text-right font-normal">
-                {p.name}<div className="flex items-center justify-end gap-1 normal-case tracking-normal"><Clock className="h-3 w-3" />{p.eta}</div>
-              </th>
-            ))}
+            {platforms.map((p) => {
+              const surge = ctx.surgeOf(p);
+              return (
+                <th key={p.id} className="label-mono px-3 py-2 text-right font-normal">
+                  {p.name}
+                  <div className="flex items-center justify-end gap-1 normal-case tracking-normal"><Clock className="h-3 w-3" />{p.eta}</div>
+                  {surge > 0 && <div className="mt-0.5 font-mono text-[10px] normal-case tracking-normal text-accent">+{inr(surge)} {p.surgeReason}</div>}
+                </th>
+              );
+            })}
             <th className="label-mono px-3 py-2 text-right font-normal">Best unit rate</th>
+            <th className="label-mono px-3 py-2 text-right font-normal">Action</th>
           </tr>
         </thead>
         <tbody>
@@ -317,17 +387,27 @@ function Matrix({ lines, platforms, ran, onVariant }: { lines: Line[]; platforms
                   const v = l.sku.prices[p.id];
                   if (v == null) return <td key={p.id} className="oos-hatch px-3 py-2.5 text-right font-mono text-[11px] text-destructive">OOS</td>;
                   const win = p.id === best;
+                  const pinned = p.id === l.pin;
                   return (
-                    <td key={p.id} className={`px-3 py-2.5 text-right font-mono tabular-nums ${win ? "border-x border-win-border bg-win text-win-foreground" : ""}`}>
+                    <td key={p.id} className={`px-3 py-2.5 text-right font-mono tabular-nums ${win ? "border-x border-win-border bg-win text-win-foreground" : ""} ${pinned ? "outline outline-1 -outline-offset-1 outline-primary" : ""}`}>
                       <div className="text-[14px] font-semibold">{inr(v * l.count)}</div>
                       <div className="text-[11px] text-muted-foreground"><s>{inr(l.sku.mrp * l.count)}</s></div>
                       <div className="text-[10.5px]">{unitRate(l.sku, v)}</div>
                       {win && <div className="mt-0.5 flex items-center justify-end gap-0.5 text-[10px] font-semibold"><Check className="h-3 w-3" />LOWEST</div>}
+                      {pinned && <div className="mt-0.5 flex items-center justify-end gap-0.5 text-[10px] font-semibold text-primary"><Pin className="h-3 w-3" />PINNED</div>}
                     </td>
                   );
                 })}
                 <td className="px-3 py-2.5 text-right font-mono text-[11px]">
                   {bp != null ? <><div className="font-semibold">{unitRate(l.sku, bp)}</div><div className="text-muted-foreground">[TAG: LOWEST_UNIT_RATE]</div></> : "—"}
+                </td>
+                <td className="px-3 py-2.5 text-right">
+                  <select value={l.pin ?? ""} onChange={(e) => onPin(l.key, (e.target.value || null) as PlatformId | null)}
+                    aria-label={`Pin store for ${l.sku.brand} ${l.sku.name}`}
+                    className={`rounded-sm border bg-card px-1 py-0.5 font-mono text-[11px] ${l.pin ? "border-primary text-primary" : "border-border"}`}>
+                    <option value="">AUTO</option>
+                    {platforms.map((p) => <option key={p.id} value={p.id}>{p.short}</option>)}
+                  </select>
                 </td>
               </tr>
             );
@@ -346,9 +426,12 @@ function Blueprint({ plan }: { plan: Plan }) {
         {plan.carts.map((c, i) => (
           <div key={c.platform.id} className="rounded-sm border border-border">
             <div className="flex items-center justify-between border-b border-border bg-secondary px-3 py-2">
-              <span className="font-mono text-[11px] font-semibold">CART {i + 1} · {c.platform.name.toUpperCase()}</span>
-              <button onClick={() => copy(c.lines.map((l) => `${l.count} x ${l.sku.brand} ${l.sku.name} ${l.sku.size}`).join("\n"))}
-                className="font-mono text-[10.5px] text-primary hover:underline">COPY ORDER</button>
+              <span className="font-mono text-[11px] font-semibold">CART {i + 1} · {c.platform.name.toUpperCase()}{c.fees.pickup ? " · PICKUP" : ""}</span>
+              <span className="flex items-center gap-3 font-mono text-[10.5px]">
+                <button onClick={() => copy(c.lines.map((l) => `${l.count} x ${l.sku.brand} ${l.sku.name} ${l.sku.size}`).join("\n"))}
+                  className="text-primary hover:underline">COPY ORDER</button>
+                <a href={c.platform.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">OPEN STORE ↗</a>
+              </span>
             </div>
             <ul className="divide-y divide-border">
               {c.lines.map((l) => (
@@ -361,8 +444,9 @@ function Blueprint({ plan }: { plan: Plan }) {
             <table className="w-full border-t border-border font-mono text-[12px] tabular-nums">
               <tbody>
                 <FeeRow k="Item subtotal" v={inr(c.subtotal)} />
-                <FeeRow k="Delivery fee" v={c.fees.delivery ? inr(c.fees.delivery) : "FREE"} />
-                <FeeRow k="Handling & platform" v={inr(c.fees.handling + c.fees.surge)} />
+                <FeeRow k={c.fees.pickup ? "Store pickup" : "Delivery fee"} v={c.fees.delivery ? inr(c.fees.delivery) : "FREE"} />
+                <FeeRow k="Handling fee" v={inr(c.fees.handling)} />
+                {c.fees.surge > 0 && <FeeRow k={c.platform.surgeReason ?? "Surge charge"} v={inr(c.fees.surge)} />}
                 <FeeRow k="Cart total" v={inr(c.total)} strong />
               </tbody>
             </table>
